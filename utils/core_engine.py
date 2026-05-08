@@ -901,11 +901,23 @@ def _handle_sub2api_dead_account(item: dict, client: Any, is_disabled: bool) -> 
     else:
         print(f"[{ts()}] [ERROR] 凭证 {mask_email(name)} 已死亡，当前已是禁用状态，根据配置保留不删除。")
 
+def _is_openai_free_sub2api_account(item: dict) -> bool:
+    credentials = item.get("credentials", {})
+    if not isinstance(credentials, dict):
+        credentials = {}
+    return (
+        str(item.get("platform", "")).lower() == "openai"
+        and str(credentials.get("plan_type", "")).lower() == "free"
+    )
+
 def process_sub2api_worker(i: int, total: int, item: dict, client: Any, args: Any) -> bool:
     """Sub2API 测活 Worker（使用 Sub2API /test SSE 接口）"""
     if hasattr(args, 'check_stop') and args.check_stop(): return False
     name = item.get("name", "unknown")
     account_id = item.get("id")
+    if not _is_openai_free_sub2api_account(item):
+        print(f"[{ts()}] [INFO] Sub2API测活: {mask_email(name)} 非 OpenAI 免费号，跳过巡检")
+        return False
     result, reason = client.test_account(account_id)
 
     if result == "ok":
@@ -1150,8 +1162,7 @@ async def perform_sub2api_check(args, async_stop_event, loop, client, executor=N
 
     filtered_list = [
         item for item in account_list
-        if item.get("platform") == "openai"
-           and str(item.get("credentials", {}).get("plan_type", "free")).lower() == "free"
+        if _is_openai_free_sub2api_account(item)
     ]
 
     total_files = len(filtered_list)
@@ -1379,8 +1390,7 @@ async def sub2api_main_loop(args, async_stop_event: asyncio.Event, executor=None
 
                 filtered_list = [
                     item for item in account_list
-                    if item.get("platform") == "openai"
-                       and str(item.get("credentials", {}).get("plan_type", "free")).lower() == "free"
+                    if _is_openai_free_sub2api_account(item)
                 ]
 
                 total_files = len(filtered_list)
@@ -1414,8 +1424,7 @@ async def sub2api_main_loop(args, async_stop_event: asyncio.Event, executor=None
 
                 filtered_list = [
                     item for item in account_list
-                    if item.get("platform") == "openai"
-                       and str(item.get("credentials", {}).get("plan_type", "free")).lower() == "free"
+                    if _is_openai_free_sub2api_account(item)
                 ]
                 total_files = len(filtered_list)
                 valid_count = total_files
