@@ -1,5 +1,32 @@
 const { createApp } = Vue;
 
+const APP_LOCALE = 'zh-CN';
+const APP_TIME_ZONE = 'Asia/Shanghai';
+
+function formatMainlandDateTime(date, options = {}) {
+    return new Intl.DateTimeFormat(APP_LOCALE, {
+        timeZone: APP_TIME_ZONE,
+        hour12: false,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        ...options
+    }).format(date).replace(/\//g, '-');
+}
+
+function formatMainlandTime(date) {
+    return new Intl.DateTimeFormat(APP_LOCALE, {
+        timeZone: APP_TIME_ZONE,
+        hour12: false,
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit'
+    }).format(date);
+}
+
 function normalizeBooleanLike(value, defaultValue = false) {
     if (value === true || value === false) {
         return value;
@@ -92,8 +119,12 @@ createApp({
                 success: 0, failed: 0, retries: 0, total: 0, target: 0,
                 pwd_blocked: 0, phone_verify: 0,
                 success_rate: '0.0%', elapsed: '0.0s', avg_time: '0.0s', progress_pct: '0%',
-                mode: '未启动'
+                mode: '未启动',
+                memory: { rss_mb: null, predicted_mid_mb: null, predicted_high_mb: null, safety_level: 'unknown', safety_label: '无数据' }
             },
+            memoryPrediction: null,
+            isLoadingMemoryPrediction: false,
+            memoryPredictionError: '',
             inventoryStats: {
                 local: { total: 0, active: 0, disabled: 0 },
                 cloud: { total: 0, cpa: 0, sub2api: 0, enabled: 0 }
@@ -173,7 +204,8 @@ createApp({
                 target: 'all',
                 count: 5,
                 instances: [],
-                groups: []
+                groups: [],
+                isDeploying: false
             },
             gmail_oauth_mode: {
                 master_email: '',
@@ -247,9 +279,9 @@ createApp({
             }
         }
     },
-    mounted() {
+    async mounted() {
         this.applyTheme();
-        this.fetchSystemVersion();
+        await this.fetchSystemVersion();
         if (this.isLoggedIn) {
             this.initApp();
         }
@@ -351,6 +383,47 @@ createApp({
             return res;
         },
 
+        formatMemoryMb(value) {
+            if (value === null || value === undefined || value === '') return 'N/A';
+            const numeric = Number(value);
+            if (Number.isNaN(numeric)) return 'N/A';
+            return `${numeric.toFixed(1)} MB`;
+        },
+
+        formatMainlandDateTime(date, options = {}) {
+            return formatMainlandDateTime(date, options);
+        },
+
+        memorySafetyClass(level) {
+            const classes = {
+                ok: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+                watch: 'bg-sky-50 text-sky-700 border-sky-200',
+                warning: 'bg-amber-50 text-amber-700 border-amber-200',
+                critical: 'bg-rose-50 text-rose-700 border-rose-200',
+                unknown: 'bg-slate-50 text-slate-600 border-slate-200'
+            };
+            return classes[level] || classes.unknown;
+        },
+
+        async fetchMemoryPrediction() {
+            if (!this.isLoggedIn) return;
+            this.isLoadingMemoryPrediction = true;
+            this.memoryPredictionError = '';
+            try {
+                const res = await this.authFetch('/api/system/memory_prediction');
+                const data = await res.json();
+                if (data.status === 'success') {
+                    this.memoryPrediction = data;
+                } else {
+                    this.memoryPredictionError = data.message || '内存预测数据获取失败';
+                }
+            } catch (e) {
+                this.memoryPredictionError = '内存预测 API 请求失败';
+            } finally {
+                this.isLoadingMemoryPrediction = false;
+            }
+        },
+
         async handleLogin() {
             if(!this.loginPassword) { this.showToast("请输入密码！", "warning"); return; }
             try {
@@ -403,6 +476,9 @@ createApp({
             }
             if (this.currentTab === 'proxy') {
                 this.fetchClashPool();
+            }
+            if (this.currentTab === 'concurrency') {
+                this.fetchMemoryPrediction();
             }
         },
         startStatsPolling() {
@@ -922,6 +998,9 @@ createApp({
             if (tabId === 'proxy') {
                 this.fetchClashPool();
             }
+            if (tabId === 'concurrency') {
+                this.fetchMemoryPrediction();
+            }
             if (tabId === 'team_accounts') {
                 this.fetchTeamAccounts();
             }
@@ -1103,7 +1182,7 @@ createApp({
                             const checkData = await checkRes.json();
                             if (!checkData.online) {
                                 const now = new Date();
-                                const timeStr = now.toLocaleTimeString('zh-CN', { hour12: false });
+            const timeStr = formatMainlandTime(now);
                                 this.showToast(`🚫 启动失败：节点 [${localId}] 未连接或已掉线！`, "error");
                                 this.logs.push({
                                     parsed: true,
@@ -1160,7 +1239,7 @@ createApp({
                 this.isRunning = false;
                 await this.fetchMailDomainRuntimeStats();
                 const now = new Date();
-                const timeStr = now.toLocaleTimeString('zh-CN', { hour12: false }); // 获取如 14:30:05 格式
+            const timeStr = formatMainlandTime(now); // 获取如 14:30:05 格式
                 this.logs.push({
                     parsed: true,
                     time: timeStr,
@@ -1846,6 +1925,7 @@ createApp({
             }
         },
         async checkUpdate(isManual = false) {
+            if (this.appVersion === '检查中...' || !this.appVersion) return;
             try {
                 const res = await this.authFetch(`/api/system/check_update?current_version=${this.appVersion}`);
                 const data = await res.json();
@@ -1982,8 +2062,7 @@ createApp({
             }
             const d = new Date(utcStr);
             if (isNaN(d.getTime())) return dateStr;
-            const pad = (n) => n.toString().padStart(2, '0');
-            return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+            return formatMainlandDateTime(d);
         },
         async exportSub2Api() {
             if (this.selectedAccounts.length === 0) {
@@ -2151,7 +2230,7 @@ createApp({
 
                 if (action === 'check') {
                     this.currentTab = 'console';
-                    const now = new Date().toLocaleString('zh-CN', { hour12: false });
+            const now = formatMainlandDateTime(new Date());
                     this.localCheckTimes[acc.id] = now;
                     acc.last_check = now;
 
@@ -2218,7 +2297,7 @@ createApp({
                     });
                 }
                 if (action === 'check') {
-                    const now = new Date().toLocaleString('zh-CN', { hour12: false });
+            const now = formatMainlandDateTime(new Date());
                     this.selectedCloud.forEach(c => { this.localCheckTimes[c.id] = now; });
                 }
 
@@ -2345,7 +2424,7 @@ createApp({
                     return;
                 }
                 const now = new Date();
-                const timeStr = now.toLocaleTimeString('zh-CN', { hour12: false });
+            const timeStr = formatMainlandTime(now);
 
                 if (data.status !== 'success') {
                     this.logs.push({ parsed: true, time: timeStr, level: '总控', text: `任务生成失败: ${data.message}`, raw: `[${timeStr}] [总控] 任务生成失败: ${data.message}` });
@@ -2382,7 +2461,7 @@ createApp({
 
             } catch (error) {
                 const now = new Date();
-                const timeStr = now.toLocaleTimeString('zh-CN', { hour12: false });
+            const timeStr = formatMainlandTime(now);
                 this.logs.push({ parsed: true, time: timeStr, level: '总控', text: `下发任务异常: ${error.message}`, raw: `[${timeStr}] [总控] 下发任务异常: ${error.message}` });
             }
         },
@@ -2416,7 +2495,7 @@ createApp({
 
                 if (event.data.type === "WORKER_READY") {
                     const now = new Date();
-                    const timeStr = now.toLocaleTimeString('zh-CN', { hour12: false });
+            const timeStr = formatMainlandTime(now);
 
                     if (this._extDetectionTimer) {
                         clearInterval(this._extDetectionTimer);
@@ -2450,7 +2529,7 @@ createApp({
 
                 if (event.data.type === "WORKER_LOG_REPLY") {
                     const now = new Date();
-                    const timeStr = now.toLocaleTimeString('zh-CN', { hour12: false });
+            const timeStr = formatMainlandTime(now);
                     this.logs.push({
                         parsed: true, time: timeStr, level: '节点',
                         text: event.data.log, raw: `[${timeStr}] [节点] ${event.data.log}`
@@ -2485,7 +2564,7 @@ createApp({
                             this.isRunning = false;
                             window.postMessage({ type: "CMD_STOP_WORKER" }, "*");
 
-                            const timeStr = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+            const timeStr = formatMainlandTime(new Date());
                             this.logs.push({
                                 parsed: true, time: timeStr, level: '总控',
                                 text: `🛑 目标产量已达成，总控引擎已自动挂起。`,
@@ -2760,7 +2839,7 @@ createApp({
                 if (d.status === 'success') {
                     this.clashPool.instances = d.data.instances;
                     this.clashPool.groups = d.data.groups;
-                    if (this.clashPool.instances.length > 0) {
+                    if (this.clashPool.instances.length > 0 && !this.clashPool.isDeploying) {
                         this.clashPool.count = this.clashPool.instances.length;
                     }
                 }
@@ -2769,6 +2848,7 @@ createApp({
         },
         async handleClashDeploy() {
             this.showToast('正在调整实例规模...', 'info');
+            this.clashPool.isDeploying = true;
             try {
                 const res = await this.authFetch('/api/clash/deploy', {
                     method: 'POST',
@@ -2776,8 +2856,18 @@ createApp({
                 });
                 const d = await res.json();
                 this.showToast(d.message, d.status);
-                this.fetchClashPool();
-            } catch (e) { this.showToast('网络错误', 'error'); }
+                if (d.status === 'success') {
+                    setTimeout(() => {
+                        this.fetchClashPool();
+                        this.clashPool.isDeploying = false;
+                    }, 5000);
+                } else {
+                    this.clashPool.isDeploying = false;
+                }
+            } catch (e) {
+                this.showToast('网络错误', 'error');
+                this.clashPool.isDeploying = false;
+            }
         },
         async handleClashUpdate() {
             if (!this.clashPool.subUrl) return this.showToast('请输入订阅链接', 'error');
@@ -2789,7 +2879,11 @@ createApp({
                 });
                 const d = await res.json();
                 this.showToast(d.message, d.status);
-                this.fetchClashPool();
+                if (d.status === 'success') {
+                    setTimeout(() => {
+                        this.fetchClashPool();
+                    }, 5000);
+                }
             } catch (e) { this.showToast('网络错误', 'error'); }
             this.clashPool.loading = false;
         },
