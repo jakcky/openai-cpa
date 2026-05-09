@@ -2,10 +2,11 @@ version: '3.8'
 
 services:
   codex-web:
-    image: wenfxl/wenfxl-codex-manager:latest
+    build: .
+    image: jakcky/openai-cpa:local
     container_name: wenfxl_codex_manager
     ports:
-      - "8000:8000"
+      - "18000:8000"
     restart: always
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -14,8 +15,6 @@ services:
     volumes:
       - ./data:/app/data
       - /var/run/docker.sock:/var/run/docker.sock
-      - /usr/bin/docker:/usr/bin/docker
-      - .:${PWD}
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
       - "com.centurylinklabs.watchtower.scope=openai-cpa"
