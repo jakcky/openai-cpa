@@ -47,7 +47,7 @@ git diff --stat HEAD..upstream/main
 
 ## 必须保留的本地定制
 
-### 1. Sub2API 只处理 OpenAI Free 账号
+### 1. Sub2API Free 判断必须要求显式 plan_type
 
 文件：
 
@@ -55,36 +55,29 @@ git diff --stat HEAD..upstream/main
 
 目的：
 
-Sub2API 仓库巡检、手动测活、自动测活和补货判断，只统计并处理 `platform == openai` 且 `credentials.plan_type == free` 的账号。
+Sub2API 仓库巡检、手动测活、自动测活和补货判断，跟随上游的账号过滤逻辑，但 `credentials.plan_type` 必须显式等于 `free` 才按 Free 账号处理。
 
-这样可以避免把非 OpenAI 账号、非 Free 账号，或其他类型库存混入 OpenAI Free 的有效库存计算和测活清理流程。
+这样可以避免上游默认值把缺少 `credentials.plan_type` 的账号当成 Free 账号，导致未知套餐账号混入 OpenAI Free 的有效库存计算和测活清理流程。
 
 必须保留的实现：
 
-- 保留 `_is_openai_free_sub2api_account(item)` 作为统一判断函数。
-- 判断条件必须是：
-  - `platform` 转小写后等于 `openai`
-  - `credentials.plan_type` 转小写后等于 `free`
-- `process_sub2api_worker()` 开始测活前必须调用该函数；不符合条件的账号跳过，不调用 `client.test_account(account_id)`。
-- `perform_sub2api_check()` 必须使用该函数过滤库存列表。
-- `sub2api_main_loop()` 的自动测活分支必须使用该函数过滤库存列表。
-- `sub2api_main_loop()` 的关闭自动测活分支也必须使用该函数过滤库存列表。
-- 本地过滤逻辑不要额外要求 `extra.codex_5h_window_minutes == 0`。
+- 只保留 `credentials.plan_type` 默认值的本地定制：缺少 `plan_type` 时不要默认为 `free`。
+- 上游如果使用 `str(...get("plan_type", "free")).lower() == "free"`，本地应改为 `str(...get("plan_type", "")).lower() == "free"`。
+- 其他 Sub2API 过滤条件和返回语义跟踪上游，包括 `platform == "openai"`、`extra.codex_5h_window_minutes == 0` 以及 `process_sub2api_worker()` 中不符合条件时的返回行为。
 
 同步后检查：
 
 ```bash
-grep -n "_is_openai_free_sub2api_account\|process_sub2api_worker\|filtered_list" utils/core_engine.py
+grep -n "plan_type.*free\\|codex_5h_window_minutes\\|process_sub2api_worker" utils/core_engine.py
 ```
 
 需要确认：
 
-- `_is_openai_free_sub2api_account()` 仍然存在。
-- `process_sub2api_worker()` 中非 OpenAI Free 账号会在测活前跳过。
-- 三处 `filtered_list` 都使用 `_is_openai_free_sub2api_account(item)`。
-- 没有恢复 `codex_5h_window_minutes == 0` 作为过滤条件。
+- `plan_type` 判断使用空字符串作为默认值，不使用 `"free"` 作为默认值。
+- 上游的 `codex_5h_window_minutes == 0` 过滤条件仍然保留。
+- 除 `plan_type` 默认值外，Sub2API 测活过滤逻辑尽量保持与上游一致。
 
-如果上游改动了 Sub2API 库存结构、`credentials.plan_type` 字段名或测活流程，需要重新确认这个函数是否仍覆盖目标账号。
+如果上游改动了 Sub2API 库存结构、`credentials.plan_type` 字段名或测活流程，需要重新确认本地是否仍只改了 `plan_type` 缺省处理。
 
 ### 2. Docker 使用本地源码构建
 
