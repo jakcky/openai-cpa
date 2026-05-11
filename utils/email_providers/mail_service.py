@@ -935,6 +935,35 @@ def mask_email(text: str, force_mask: bool = False) -> str:
     return text
 
 
+def _sanitize_response_text_for_log(text: str, max_len: int = 500) -> str:
+    text = str(text or "").replace("\r", " ").replace("\n", " ").strip()
+    if not text:
+        return ""
+    text = re.sub(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", lambda m: mask_email(m.group(0), force_mask=True), text)
+    text = re.sub(r'(?i)("?(?:authorization|x-admin-auth|admin_auth|token|jwt|secret|password)"?\s*[:=]\s*")([^"]+)(")', r"\1***\3", text)
+    if len(text) > max_len:
+        return text[:max_len] + "..."
+    return text
+
+
+def _format_http_response_for_log(response: Any) -> str:
+    if response is None:
+        return ""
+    status_code = getattr(response, "status_code", "")
+    body = _sanitize_response_text_for_log(getattr(response, "text", ""))
+    if body:
+        return f"HTTP {status_code}: {body}"
+    return f"HTTP {status_code}"
+
+
+def _format_http_exception_for_log(exc: Exception) -> str:
+    response = getattr(exc, "response", None)
+    detail = _format_http_response_for_log(response)
+    if detail:
+        return detail
+    return str(exc)
+
+
 def _reset_cm_token_cache() -> None:
     global _CM_TOKEN_CACHE
     _CM_TOKEN_CACHE = None
@@ -1439,6 +1468,16 @@ def get_email_and_token(
                     print(f"[{cfg.ts()}] [WARNING] cloudflare_temp_email邮箱容量疑似超限 (尝试 {attempt + 1}/5): {res.text}")
                     time.sleep(1)
                     continue
+                if status_code == 400:
+                    terminal_failure_reason = "cloudflare_temp_email_network"
+                    print(
+                        f"[{cfg.ts()}] [ERROR] cloudflare_temp_email邮箱申请参数被后端拒绝 "
+                        f"(尝试 {attempt + 1}/5, domain={mask_email(selected_domain, force_mask=True)}): "
+                        f"{_format_http_response_for_log(res)}"
+                    )
+                    if getattr(cfg, 'ENABLE_SUB_DOMAINS', False):
+                        print(f"[{cfg.ts()}] [WARNING] 当前已开启多级域名泛解析模式；若 cloudflare_temp_email 后端不是魔改版 Worker，请关闭该模式或改用已在 Worker 配置中的主域名。")
+                    break
                 res.raise_for_status()
                 data = res.json()
                 if data and data.get("address"):
@@ -1454,7 +1493,7 @@ def get_email_and_token(
                 time.sleep(1)
             except Exception as e:
                 terminal_failure_reason = "cloudflare_temp_email_network"
-                print(f"[{cfg.ts()}] [ERROR] cloudflare_temp_email邮箱注册网络异常，准备重试: {e}")
+                print(f"[{cfg.ts()}] [ERROR] cloudflare_temp_email邮箱注册网络异常，准备重试: {_format_http_exception_for_log(e)}")
                 time.sleep(2)
         if terminal_failure_reason:
             _set_last_domain_failure_event(selected_domain, terminal_failure_reason)
