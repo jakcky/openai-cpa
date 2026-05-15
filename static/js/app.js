@@ -483,6 +483,9 @@ createApp({
             currentCloudDetail: null,
             nowTimestamp: Math.floor(Date.now() / 1000),
             clusterNodes: {},
+            clusterSyncTasks: [],
+            clusterSyncTasksLoading: false,
+            showClusterSyncErrors: true,
             mailboxes: [],
             selectedMailboxes: [],
             mailboxPage: 1,
@@ -896,6 +899,9 @@ createApp({
             this.applyTheme();
             this.showToast(this.isDarkMode ? '已切换为护眼模式' : '已切换为日间模式', 'info');
         },
+        isDefaultClusterSecret(secret) {
+            return ['','wenfxl666'].includes(String(secret || '').trim());
+        },
         showToast(message, type = 'info') {
             const id = this.toastId++;
             this.toasts.push({ id, message: this.t(message), type });
@@ -1192,6 +1198,9 @@ createApp({
             if (this.config && this.config.reg_mode === 'extension') {
                 this.listenToExtension();
             }
+            if (this.currentTab === 'cluster') {
+                this.fetchClusterSyncTasks();
+            }
             if (this.currentTab === 'proxy') {
                 this.fetchClashPool();
             }
@@ -1265,6 +1274,7 @@ createApp({
                     if (cData.status === 'success') {
                         this.clusterNodes = cData.nodes;
                     }
+                    await this.fetchClusterSyncTasks({ silent: true });
                 }
             } catch(e) {
 
@@ -1317,6 +1327,7 @@ createApp({
                         this.config.smsbower.reuse_phone = normalizeBooleanLike(this.config.smsbower.reuse_phone, true);
                         this.config.smsbower.verify_on_register = normalizeBooleanLike(this.config.smsbower.verify_on_register, false);
                         if(this.config.smsbower.reuse_max === undefined) this.config.smsbower.reuse_max = 2;
+                        if(this.config.smsbower.use_proxy === undefined) this.config.smsbower.use_proxy = false;
                     }
 
                     if (!this.config.fivesim) {
@@ -1327,11 +1338,13 @@ createApp({
                         };
                     } else {
                         if(this.config.fivesim.reuse_max === undefined) this.config.fivesim.reuse_max = 2;
+                        if(this.config.fivesim.use_proxy === undefined) this.config.fivesim.use_proxy = false;
                     }
 
                     if (this.config.hero_sms) {
                         this.config.hero_sms.enabled = normalizeBooleanLike(this.config.hero_sms.enabled, false);
                         if(this.config.hero_sms.reuse_max === undefined) this.config.hero_sms.reuse_max = 2;
+                        if(this.config.hero_sms.use_proxy === undefined) this.config.hero_sms.use_proxy = false;
                     }
                 }
 
@@ -1385,6 +1398,9 @@ createApp({
                 if (!this.config.max_log_lines) {
                     this.config.max_log_lines = 500;
                 }
+                let clusterUploadTimeout = parseInt(this.config.cluster_upload_timeout_sec, 10);
+                if (Number.isNaN(clusterUploadTimeout)) clusterUploadTimeout = 15;
+                this.config.cluster_upload_timeout_sec = Math.max(15, Math.min(3600, clusterUploadTimeout));
                 if (!this.config.temporam) {
                     this.config.temporam = { cookie: '' };
                 }
@@ -1795,6 +1811,9 @@ createApp({
                 )];
                 this.config.mail_domain_fail_threshold = Math.max(0, parseInt(this.config.mail_domain_fail_threshold, 10) || 0);
                 this.config.mail_domain_fail_cooldown_sec = Math.max(0, parseInt(this.config.mail_domain_fail_cooldown_sec, 10) || 0);
+                let clusterUploadTimeout = parseInt(this.config.cluster_upload_timeout_sec, 10);
+                if (Number.isNaN(clusterUploadTimeout)) clusterUploadTimeout = 15;
+                this.config.cluster_upload_timeout_sec = Math.max(15, Math.min(3600, clusterUploadTimeout));
                 this.config.warp_proxy_list = this.warpListStr.split('\n').map(s => s.trim()).filter(s => s);
                 if (!this.config.raw_proxy_pool || typeof this.config.raw_proxy_pool !== 'object' || Array.isArray(this.config.raw_proxy_pool)) {
                     this.config.raw_proxy_pool = { enable: false, proxy_list: [] };
@@ -2100,7 +2119,20 @@ createApp({
                     if (this.config?.reg_mode === 'extension') {
                         this.showToast("📡 正在探测节点在线状态...", "info");
                         try {
-                            const localId = localStorage.getItem('local_worker_id') || 'Node-Pilot-01';
+                            const localId = localStorage.getItem('local_worker_id');
+                            if (!localId) {
+                                const now = new Date();
+            const timeStr = formatMainlandTime(now);
+                                this.showToast("🚫 启动失败：未检测到插件节点身份，请先刷新插件连接", "error");
+                                this.logs.push({
+                                    parsed: true,
+                                    time: timeStr,
+                                    level: '系统',
+                                    text: '🛑 未检测到有效插件节点身份，请确认插件已连接并刷新页面后重试。',
+                                    raw: `[${timeStr}] [系统] 🛑 未检测到有效插件节点身份，请确认插件已连接并刷新页面后重试。`
+                                });
+                                return;
+                            }
                             const checkRes = await this.authFetch(`/api/ext/check_node?worker_id=${localId}`);
                             const checkData = await checkRes.json();
                             if (!checkData.online) {
@@ -3296,12 +3328,125 @@ async exportSub2Api() {
                 const data = await res.json();
                 if (data.status === 'success') {
                     this.showToast(`✅ 指令 [${action}] 已成功发送至节点: ${nodeName}`, 'success');
+                    if (action === 'export_accounts') {
+                        setTimeout(() => this.fetchClusterSyncTasks({ silent: true }), 1000);
+                    }
                 } else {
                     this.showToast(data.message, 'warning');
                 }
             } catch (e) {
                 this.showToast('控制请求异常', 'error');
             }
+        },
+        async fetchClusterSyncTasks(options = {}) {
+            const { silent = false } = options;
+            if (!silent) {
+                this.clusterSyncTasksLoading = true;
+            }
+            try {
+                const res = await this.authFetch('/api/cluster/sync_tasks?limit=20');
+                const data = await res.json();
+                if (data.status === 'success') {
+                    this.clusterSyncTasks = Array.isArray(data.tasks) ? data.tasks : [];
+                } else if (!silent) {
+                    this.showToast(data.message || '同步任务列表获取失败', 'warning');
+                }
+            } catch (e) {
+                if (!silent) {
+                    this.showToast('同步任务列表获取失败', 'error');
+                }
+            } finally {
+                if (!silent) {
+                    this.clusterSyncTasksLoading = false;
+                }
+            }
+        },
+        async clearTerminalClusterSyncTasks() {
+            const confirmed = await this.customConfirm('确定清理所有已完成、已取消和已中断的同步任务吗？此操作不可恢复。');
+            if (!confirmed) return;
+            try {
+                const res = await this.authFetch('/api/cluster/sync_tasks/clear_terminal', {
+                    method: 'POST'
+                });
+                const data = await res.json();
+                if (data.status === 'success') {
+                    this.showToast(data.message || '终态同步任务已清理', 'success');
+                    await this.fetchClusterSyncTasks();
+                } else {
+                    this.showToast(data.message || '终态同步任务清理失败', 'warning');
+                }
+            } catch (e) {
+                this.showToast('终态同步任务清理失败', 'error');
+            }
+        },
+        async retryClusterSyncTask(taskId) {
+            if (!taskId) return;
+            try {
+                const res = await this.authFetch(`/api/cluster/sync_tasks/${encodeURIComponent(taskId)}/retry`, {
+                    method: 'POST'
+                });
+                const data = await res.json();
+                if (data.status === 'success') {
+                    this.showToast(data.message || `同步任务 ${taskId} 已重新排队`, 'success');
+                    await this.fetchClusterSyncTasks({ silent: true });
+                } else {
+                    this.showToast(data.message || '同步任务重试失败', 'warning');
+                }
+            } catch (e) {
+                this.showToast('同步任务重试失败', 'error');
+            }
+        },
+        async cancelClusterSyncTask(taskId) {
+            if (!taskId) return;
+            try {
+                const res = await this.authFetch(`/api/cluster/sync_tasks/${encodeURIComponent(taskId)}/cancel`, {
+                    method: 'POST'
+                });
+                const data = await res.json();
+                if (data.status === 'success') {
+                    this.showToast(data.message || `同步任务 ${taskId} 已取消`, 'success');
+                    await this.fetchClusterSyncTasks({ silent: true });
+                } else {
+                    this.showToast(data.message || '同步任务取消失败', 'warning');
+                }
+            } catch (e) {
+                this.showToast('同步任务取消失败', 'error');
+            }
+        },
+        formatClusterSyncStatus(status) {
+            const statusMap = {
+                pending: '排队中',
+                running: '导入中',
+                success: '已完成',
+                partial_success: '部分成功',
+                failed: '失败',
+                retry_wait: '待重试',
+                cancel_requested: '取消中',
+                cancelled: '已取消'
+            };
+            return statusMap[String(status || '').trim()] || (status || '未知');
+        },
+        clusterSyncStatusClass(status) {
+            const normalized = String(status || '').trim();
+            if (normalized === 'success') return 'bg-emerald-50 text-emerald-600 border-emerald-200';
+            if (normalized === 'partial_success') return 'bg-amber-50 text-amber-600 border-amber-200';
+            if (normalized === 'failed') return 'bg-rose-50 text-rose-600 border-rose-200';
+            if (normalized === 'retry_wait') return 'bg-orange-50 text-orange-600 border-orange-200';
+            if (normalized === 'cancel_requested') return 'bg-slate-100 text-slate-600 border-slate-300';
+            if (normalized === 'cancelled') return 'bg-slate-100 text-slate-500 border-slate-200';
+            if (normalized === 'running') return 'bg-sky-50 text-sky-600 border-sky-200';
+            return 'bg-slate-100 text-slate-600 border-slate-200';
+        },
+        formatClusterSyncTime(value) {
+            if (!value) return '-';
+            const normalized = String(value).replace(' ', 'T');
+            const date = new Date(normalized);
+            if (Number.isNaN(date.getTime())) return value;
+            return this.formatMainlandDateTime(date);
+        },
+        formatClusterSyncError(errorMessage) {
+            const text = String(errorMessage || '').trim();
+            return text || '-';
         },
         formatDuration(seconds) {
             if (!seconds || seconds < 0) return "0s";
@@ -3349,6 +3494,7 @@ async exportSub2Api() {
                 const res = JSON.parse(event.data);
                 if (res.status === 'success') {
                     this.clusterNodes = res.nodes;
+                    this.fetchClusterSyncTasks({ silent: true });
                 }
             };
 
